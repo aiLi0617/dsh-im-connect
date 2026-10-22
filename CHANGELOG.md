@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Added an opt-in Feishu/Lark group trigger mode that keeps the backward-compatible bot-only default and can also trigger when the QR-bound owner is mentioned.
+- Extended mode keeps up to 30 ordinary messages from the last 30 minutes in memory per group as background without creating sessions or calling the model. Mentioning both trigger targets runs once, and bot-authored messages cannot loop back.
+- Added a bilingual account setting and documented the `im:message.group_msg` scope and `ownerOpenId` requirements.
+
 ## 1.0.12 - 2026-10-21
 
 - Support per-account outbound proxy configuration for Telegram and Discord: choose between following host proxy (default), connecting directly, or configuring custom HTTP/HTTPS proxies.

@@ -22,6 +22,7 @@ import type { ChannelAdapter, EngineConfig, ImMessage, SendMode } from './engine
 import { KeyedSerialQueue } from './engine/keyed-queue.js'
 import { backupCorruptFileSync, writeFileAtomicSync } from './engine/atomic-file.js'
 import { sameWorkspacePath } from './engine/workspace-path.js'
+import { normalizeFeishuGroupTriggerMode, type FeishuGroupTriggerMode } from './channels/feishu.js'
 
 export const API_CLIENT_HEADER = 'x-dsh-im-connect-client'
 const MAX_API_BODY_BYTES = 1024 * 1024
@@ -170,6 +171,8 @@ export interface ChannelState {
   privateAccess?: 'approved' | 'all'
   /** 普通消息的默认发送方式；缺省为排队发送。 */
   sendMode?: SendMode
+  /** 飞书/Lark 群聊触发策略；缺省保持旧版的仅 @机器人。 */
+  groupTriggerMode?: FeishuGroupTriggerMode
   lastCheckedAt?: string
 }
 
@@ -192,6 +195,7 @@ export interface AccountView {
   commandPermissions: CommandPermissions
   privateAccess: 'approved' | 'all'
   sendMode: SendMode
+  groupTriggerMode: FeishuGroupTriggerMode
   proxyMode: ChannelProxyMode
   proxyConfigured: boolean
   proxyUrl?: string
@@ -398,6 +402,7 @@ export class ChannelManager {
       commandPermissions: normalizeCommandPermissions(state.commandPermissions),
       privateAccess: state.privateAccess === 'all' ? 'all' : 'approved',
       sendMode: normalizeSendMode(state.sendMode),
+      groupTriggerMode: normalizeFeishuGroupTriggerMode(state.groupTriggerMode),
       proxyMode: supportsProxy(platform) && (config.proxyMode === 'direct' || config.proxyMode === 'custom') ? config.proxyMode : 'inherit',
       proxyConfigured: supportsProxy(platform) && config.proxyMode === 'custom'
         ? this.proxyUrlCache.has(accountId)
@@ -464,6 +469,7 @@ export class ChannelManager {
       commandPermissions: normalized.settings.commandPermissions,
       privateAccess: normalized.settings.privateAccess,
       sendMode: normalized.settings.sendMode,
+      groupTriggerMode: normalized.settings.groupTriggerMode,
       enabled: true,
       receiveEnabled: true,
       config: nextConfig,
@@ -861,6 +867,8 @@ export class ChannelManager {
       const previousCwd = normalizeWorkspacePath(state.cwd) ?? this.currentWorkspace()
       const previousPreset = state.agentPreset || this.engineConfig.agentPreset || 'standard'
       const presetChanged = previousPreset !== normalized.settings.agentPreset
+      const groupTriggerModeChanged = (platform === 'feishu' || platform === 'lark')
+        && normalizeFeishuGroupTriggerMode(state.groupTriggerMode) !== normalized.settings.groupTriggerMode
       if (presetChanged) {
         for (const record of this.sessions.list().filter(item => item.channel === accountId && !item.adopted && !item.agentPreset)) {
           this.sessions.updateSession({ ...record, agentPreset: previousPreset })
@@ -880,6 +888,7 @@ export class ChannelManager {
       state.privateAccess = normalized.settings.privateAccess
       // 发送方式按注入时机读取，不需要重载会话。
       state.sendMode = normalized.settings.sendMode
+      state.groupTriggerMode = normalized.settings.groupTriggerMode
       if (supportsProxy(platform) && !this.proxyUrlCache.has(accountId)) {
         await this.hydrateProxyUrl(accountId, state)
       }
@@ -910,6 +919,7 @@ export class ChannelManager {
       this.flush()
       if (reloadSessions) await this.engine.reloadChannel(accountId, { resetSessions })
       if (proxyChanged && this.running.has(accountId)) await this.startOne(accountId)
+      if (groupTriggerModeChanged && this.running.has(accountId)) await this.startOne(accountId)
       return { ok: true, account: this.accountView(accountId, state) }
     })
   }
@@ -1144,7 +1154,10 @@ export class ChannelManager {
     const START_TIMEOUT_MS = 30_000
     let startTimer: ReturnType<typeof setTimeout> | undefined
     try {
-      adapter = createChannelAdapter(platform, resolved, this.log, accountDir, {
+      const runtimeConfig = platform === 'feishu' || platform === 'lark'
+        ? { ...resolved, groupTriggerMode: normalizeFeishuGroupTriggerMode(state.groupTriggerMode) }
+        : resolved
+      adapter = createChannelAdapter(platform, runtimeConfig, this.log, accountDir, {
         accountId: id,
         accountLabel: state.name || `${CHANNEL_META[platform].label}账号`,
         host: this.ctx,
@@ -1283,6 +1296,7 @@ export class ChannelManager {
       state.permission = normalizePermission(state.permission, this.permissionPresets().names) ?? permission
       state.privateAccess = state.privateAccess === 'all' ? 'all' : 'approved'
       state.sendMode = normalizeSendMode(state.sendMode)
+      state.groupTriggerMode = normalizeFeishuGroupTriggerMode(state.groupTriggerMode)
     }
     this.store.version = 2
   }
@@ -1325,7 +1339,7 @@ export class ChannelManager {
     return ordinal
   }
 
-  private async normalizeAccountSettings(platform: ChannelId, input: Record<string, unknown>, previous: ChannelState): Promise<{ ok: true; settings: { name: string; nameOrdinal: number; assistant: AssistantModel; agentPreset: string; cwd: string; permission: PermissionPreset; commandPermissions: CommandPermissions; privateAccess: 'approved' | 'all'; sendMode: SendMode } } | { ok: false; error: string }> {
+  private async normalizeAccountSettings(platform: ChannelId, input: Record<string, unknown>, previous: ChannelState): Promise<{ ok: true; settings: { name: string; nameOrdinal: number; assistant: AssistantModel; agentPreset: string; cwd: string; permission: PermissionPreset; commandPermissions: CommandPermissions; privateAccess: 'approved' | 'all'; sendMode: SendMode; groupTriggerMode: FeishuGroupTriggerMode } } | { ok: false; error: string }> {
     const agentPreset = input.agentPreset ?? previous.agentPreset ?? this.engineConfig.agentPreset ?? 'standard'
     if (typeof agentPreset !== 'string' || !agentPreset.trim()) return { ok: false, error: '请选择 Agent 预设' }
     if (input.agentPreset !== undefined) {
@@ -1348,6 +1362,7 @@ export class ChannelManager {
     if (!permission) return { ok: false, error: '请选择权限' }
     const privateAccess = input.privateAccess === 'all' || (input.privateAccess === undefined && previous.privateAccess === 'all') ? 'all' : 'approved'
     const sendMode = normalizeSendMode(input.sendMode === undefined ? previous.sendMode : input.sendMode)
+    const groupTriggerMode = normalizeFeishuGroupTriggerMode(input.groupTriggerMode === undefined ? previous.groupTriggerMode : input.groupTriggerMode)
     let commandPermissions: CommandPermissions
     try { commandPermissions = normalizeCommandPermissions(input.commandPermissions === undefined ? previous.commandPermissions : input.commandPermissions) }
     catch { return { ok: false, error: '命令权限配置无效' } }
@@ -1357,7 +1372,7 @@ export class ChannelManager {
     if ([...trimmed].length > ACCOUNT_REMARK_LIMIT) return { ok: false, error: `账号备注不能超过 ${ACCOUNT_REMARK_LIMIT} 个字符` }
     if (/[\u0000-\u001F\u007F]/.test(trimmed)) return { ok: false, error: '账号备注不能包含换行或控制字符' }
     const name = trimmed || autoAccountName(platform, nameOrdinal)
-    return { ok: true, settings: { name, nameOrdinal, assistant, agentPreset, cwd, permission, privateAccess, sendMode, commandPermissions } }
+    return { ok: true, settings: { name, nameOrdinal, assistant, agentPreset, cwd, permission, privateAccess, sendMode, groupTriggerMode, commandPermissions } }
   }
 
   private accountIdFor(platform: ChannelId, config: Record<string, string>): string {

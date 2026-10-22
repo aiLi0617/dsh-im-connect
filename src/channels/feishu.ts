@@ -145,6 +145,8 @@ interface FeishuConfig {
   appId?: string
   appSecret?: string
   domain?: 'feishu' | 'lark'
+  ownerOpenId?: string
+  groupTriggerMode?: FeishuGroupTriggerMode
   host?: { get(name: string): unknown }
 }
 
@@ -153,10 +155,105 @@ interface FeishuMention {
   id?: { open_id?: string }
 }
 
+export type FeishuGroupTriggerMode = 'bot-mention' | 'owner-or-bot'
+
+export const FEISHU_GROUP_CONTEXT_MAX_MESSAGES = 30
+export const FEISHU_GROUP_CONTEXT_TTL_MS = 30 * 60_000
+const FEISHU_GROUP_CONTEXT_MESSAGE_MAX_CHARS = 2_000
+
+export function normalizeFeishuGroupTriggerMode(value: unknown): FeishuGroupTriggerMode {
+  return value === 'owner-or-bot' ? 'owner-or-bot' : 'bot-mention'
+}
+
+export function isFeishuUserMentioned(mentions: FeishuMention[] | undefined, openId: string): boolean {
+  if (!openId || !Array.isArray(mentions)) return false
+  return mentions.some((mention) => mention.id?.open_id === openId)
+}
+
 /** 群消息只有明确 mention 当前机器人本身才算 addressed；@ 其他成员不触发。 */
 export function isFeishuBotMentioned(mentions: FeishuMention[] | undefined, botOpenId: string): boolean {
-  if (!botOpenId || !Array.isArray(mentions)) return false
-  return mentions.some((mention) => mention.id?.open_id === botOpenId)
+  return isFeishuUserMentioned(mentions, botOpenId)
+}
+
+interface FeishuGroupContextEntry {
+  at: number
+  senderId: string
+  text: string
+}
+
+/**
+ * 普通群消息只进入这个有界内存缓冲，不进入 Gateway，也不会创建会话或触发模型。
+ * 进程停止即清空，避免把完整群聊历史长期落盘。
+ */
+export class FeishuGroupContextBuffer {
+  private readonly chats = new Map<string, FeishuGroupContextEntry[]>()
+
+  constructor(
+    private readonly maxMessages = FEISHU_GROUP_CONTEXT_MAX_MESSAGES,
+    private readonly ttlMs = FEISHU_GROUP_CONTEXT_TTL_MS,
+  ) {}
+
+  add(chatId: string, senderId: string | undefined, text: string, now = Date.now()): void {
+    const normalized = text.trim().slice(0, FEISHU_GROUP_CONTEXT_MESSAGE_MAX_CHARS)
+    if (!chatId || !normalized) return
+    const entries = this.recent(chatId, now)
+    entries.push({ at: now, senderId: senderId?.trim() || 'unknown', text: normalized })
+    if (entries.length > this.maxMessages) entries.splice(0, entries.length - this.maxMessages)
+    this.chats.set(chatId, entries)
+  }
+
+  recent(chatId: string, now = Date.now()): FeishuGroupContextEntry[] {
+    const cutoff = now - this.ttlMs
+    const entries = (this.chats.get(chatId) ?? []).filter((entry) => entry.at >= cutoff)
+    if (entries.length) this.chats.set(chatId, entries)
+    else this.chats.delete(chatId)
+    return entries.map((entry) => ({ ...entry }))
+  }
+
+  clear(): void { this.chats.clear() }
+}
+
+/** 不下载资源地提取普通群消息摘要，供滚动上下文使用。 */
+export function feishuContextText(message: FeishuContentMessage): string {
+  let content: Record<string, unknown>
+  try {
+    const parsed = JSON.parse(message.content ?? '{}') as unknown
+    content = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}
+  } catch { return '' }
+  if (message.message_type === 'text') return typeof content.text === 'string' ? content.text : ''
+  if (message.message_type === 'image') return '[图片]'
+  if (message.message_type === 'file') return `[文件${typeof content.file_name === 'string' && content.file_name ? `: ${content.file_name}` : ''}]`
+  if (message.message_type !== 'post') return message.message_type ? `[${message.message_type}消息]` : ''
+  const localized = content.content ? content : Object.values(content).find((value) => value && typeof value === 'object' && !Array.isArray(value))
+  if (!localized || typeof localized !== 'object') return ''
+  const post = localized as { title?: unknown; content?: unknown }
+  const texts: string[] = typeof post.title === 'string' && post.title ? [post.title] : []
+  if (Array.isArray(post.content)) {
+    for (const row of post.content) {
+      if (!Array.isArray(row)) continue
+      for (const item of row) {
+        if (!item || typeof item !== 'object') continue
+        const node = item as { tag?: unknown; text?: unknown }
+        if (typeof node.text === 'string') texts.push(node.text)
+        else if (node.tag === 'img') texts.push('[图片]')
+      }
+    }
+  }
+  return texts.join('\n')
+}
+
+export function prependFeishuGroupContext(current: string, entries: FeishuGroupContextEntry[]): string {
+  if (!entries.length) return current
+  const history = entries.map((entry) => `- [${entry.senderId}] ${entry.text}`).join('\n')
+  return [
+    '<group_context>',
+    '以下是触发消息之前的群聊上下文，仅用于理解对话背景：',
+    history,
+    '</group_context>',
+    '<current_message>',
+    current,
+    '</current_message>',
+  ].join('\n')
 }
 
 export function createFeishuChannel(id: 'feishu' | 'lark', config: FeishuConfig, log: (line: string) => void, loadSdk?: () => Promise<typeof import('@larksuiteoapi/node-sdk')>): ChannelAdapter | undefined {
@@ -201,6 +298,12 @@ export function createFeishuChannel(id: 'feishu' | 'lark', config: FeishuConfig,
       }
       const botOpenId = identity.bot?.open_id?.trim() ?? ''
       if (!botOpenId) throw new Error(`${id}: 无法获取机器人 open_id`)
+      const ownerOpenId = config.ownerOpenId?.trim() ?? ''
+      const groupTriggerMode = normalizeFeishuGroupTriggerMode(config.groupTriggerMode)
+      const groupContexts = new FeishuGroupContextBuffer()
+      if (groupTriggerMode === 'owner-or-bot' && !ownerOpenId) {
+        log(`[${id}] 群聊扩展触发已启用，但账号缺少 ownerOpenId；当前只能由 @机器人 触发`)
+      }
       const dispatcher = new sdk.EventDispatcher({}).register({
         'card.action.trigger': async (data: { operator?: { open_id?: string }; action?: { value?: { token?: string; group?: boolean } }; context?: { open_chat_id?: string }; event_id?: string }) => {
           const token = data.action?.value?.token
@@ -217,11 +320,21 @@ export function createFeishuChannel(id: 'feishu' | 'lark', config: FeishuConfig,
           const message = data.message
           if (!message) return
           const group = message.chat_type === 'group'
-          const addressed = !group || isFeishuBotMentioned(message.mentions, botOpenId)
-          if (!addressed || !message.chat_id || !current()) return
+          const senderId = data.sender?.sender_id?.open_id
+          if (group && senderId === botOpenId) return
+          const botMentioned = isFeishuBotMentioned(message.mentions, botOpenId)
+          const ownerMentioned = groupTriggerMode === 'owner-or-bot' && isFeishuUserMentioned(message.mentions, ownerOpenId)
+          const addressed = !group || botMentioned || ownerMentioned
+          if (!message.chat_id || !current()) return
           const chatId = message.chat_id
           return incoming.run(chatId, async () => {
             if (!current()) return
+            if (group && groupTriggerMode === 'owner-or-bot' && !addressed) {
+              groupContexts.add(chatId, senderId, feishuContextText(message))
+              return
+            }
+            if (!addressed) return
+            const priorContext = group && groupTriggerMode === 'owner-or-bot' ? groupContexts.recent(chatId) : []
             let resolved: { text: string; media: ImMedia[] }
             try {
               resolved = await resolveFeishuContent(client!, message, timeoutSignal(30_000, generation.signal))
@@ -238,10 +351,14 @@ export function createFeishuChannel(id: 'feishu' | 'lark', config: FeishuConfig,
               return
             }
             if (!current()) return
+            const currentText = feishuContextText(message) || resolved.text
+            if (group && groupTriggerMode === 'owner-or-bot') groupContexts.add(chatId, senderId, currentText)
             await handler?.({
               chatId,
-              userId: data.sender?.sender_id?.open_id,
-              text: resolved.text,
+              userId: senderId,
+              text: group && groupTriggerMode === 'owner-or-bot'
+                ? prependFeishuGroupContext(resolved.text, priorContext)
+                : resolved.text,
               ...(resolved.media.length ? { media: resolved.media } : {}),
               messageId: message.message_id,
               kind: group ? 'group' : 'dm',

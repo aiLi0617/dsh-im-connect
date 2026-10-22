@@ -939,3 +939,42 @@ test('发送方式选择器有双语词条，保存请求带上所选值', () =>
   assert.match(client, /account\.privateAccess, account\.sendMode,/)
   assert.match(client, /sendMode: "queue",/)
 })
+
+test('飞书群聊扩展触发按账号持久化，其他渠道保持兼容默认值', async t => {
+  const manager = makeManager(t)
+  manager.startOne = async () => undefined
+  const created = await manager.connect('feishu', {
+    appId: 'group-trigger-app', appSecret: 'secret', ownerOpenId: 'ou-owner',
+  }, {
+    provider: 'group-trigger-provider',
+    model: 'group-trigger-model',
+    cwd: 'D:\\repo\\group-trigger',
+    permission: 'review',
+  })
+  assert.equal(created.ok, true, created.error)
+  assert.equal(accountOf(manager, created.accountId).groupTriggerMode, 'bot-mention')
+
+  const enabled = await manager.updateAccount(created.accountId, { groupTriggerMode: 'owner-or-bot' })
+  assert.equal(enabled.ok, true)
+  assert.equal(enabled.account.groupTriggerMode, 'owner-or-bot')
+  const persisted = JSON.parse(readFileSync(manager.file, 'utf8'))
+  assert.equal(persisted.channels[created.accountId].groupTriggerMode, 'owner-or-bot')
+
+  const preserved = await manager.updateAccount(created.accountId, { name: '群助理' })
+  assert.equal(preserved.account.groupTriggerMode, 'owner-or-bot')
+  const invalid = await manager.updateAccount(created.accountId, { groupTriggerMode: 'invalid' })
+  assert.equal(invalid.account.groupTriggerMode, 'bot-mention')
+
+  const telegram = await manager.connect('telegram', { token: 'group-trigger-default' }, {})
+  assert.equal(accountOf(manager, telegram.accountId).groupTriggerMode, 'bot-mention')
+})
+
+test('飞书群聊触发设置有双语词条并随账号保存', () => {
+  const client = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+  assert.match(client, /"account\.groupTriggerMode": "群聊触发"/)
+  assert.match(client, /"account\.groupTriggerMode": "Group trigger"/)
+  assert.match(client, /"account\.groupTriggerOwnerOrBot": "@本人或 @机器人"/)
+  assert.match(client, /"account\.groupTriggerOwnerOrBot": "Mention owner or bot"/)
+  assert.match(client, /groupTriggerMode: next\.groupTriggerMode,/)
+  assert.match(client, /onChange: \(next\) => save\(\{ groupTriggerMode: next \}\)/)
+})

@@ -5,6 +5,7 @@ import { type DiagnosticCheck } from './channels/diagnostics.js';
 import type { ChannelId, SessionRecord } from './engine/session-id.js';
 import { type AssistantModel, type PermissionPreset } from './engine/assistant-settings.js';
 import type { EngineConfig, SendMode } from './engine/types.js';
+import { type FeishuGroupTriggerMode } from './channels/feishu.js';
 export declare const API_CLIENT_HEADER = "x-dsh-im-connect-client";
 type ChannelProxyMode = 'inherit' | 'direct' | 'custom';
 interface ApiBodyReadResult {
@@ -34,6 +35,8 @@ export interface ChannelState {
     privateAccess?: 'approved' | 'all';
     /** 普通消息的默认发送方式；缺省为排队发送。 */
     sendMode?: SendMode;
+    /** 飞书/Lark 群聊触发策略；缺省保持旧版的仅 @机器人。 */
+    groupTriggerMode?: FeishuGroupTriggerMode;
     lastCheckedAt?: string;
 }
 export interface AccountView {
@@ -55,6 +58,7 @@ export interface AccountView {
     commandPermissions: CommandPermissions;
     privateAccess: 'approved' | 'all';
     sendMode: SendMode;
+    groupTriggerMode: FeishuGroupTriggerMode;
     proxyMode: ChannelProxyMode;
     proxyConfigured: boolean;
     proxyUrl?: string;

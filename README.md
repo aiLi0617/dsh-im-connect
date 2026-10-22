@@ -4,7 +4,7 @@
 
 <div align="center">
 
-  # DSH IM Connect
+# DSH IM Connect
 
   **Connect Feishu, Lark, DingTalk, WeCom, WeChat, QQ, Telegram, Discord, and Slack to local DeepSeek Harness**
 
@@ -37,8 +37,8 @@ Inbound messages are identified before commands, tool approvals, or injection.
 
 | Case | Behavior |
 |---|---|
-| Group without a mention of this bot | Ignored without a reply or pending approval request; mentioning someone else also does not trigger it |
-| Group explicitly mentioning this bot | No binding. Anyone can send work |
+| Group message that misses the configured trigger | Ignored by default; Feishu/Lark extended mode keeps it as short-lived context without replying |
+| Group message that hits the configured trigger | The default is a bot mention. Feishu/Lark can optionally trigger on the QR-bound owner or the bot. No binding is required |
 | DM from the QR scanner | WeChat / Feishu / Lark / QQ scanners are allowlisted automatically |
 | DM from anyone else | Appears on the settings pending list until approved |
 | DM after QR binding that does not return user identity | DingTalk / WeCom QR setup returns bot credentials only, so the scanner still needs settings approval |
@@ -48,6 +48,12 @@ Inbound messages are identified before commands, tool approvals, or injection.
 | Interactive choice | Reply with an option number or text in the originating IM conversation; separate multiple choices with commas or add a custom answer; only the initiating user can answer in a group |
 
 WeChat is QR-only and DM-only, so the same WeChat account that scanned can talk immediately. A different WeChat account DMing the bot waits for settings approval.
+
+### Feishu / Lark: mention the owner or the bot
+
+Feishu and Lark account settings can change **Group trigger** from the backward-compatible **Mention the bot only** default to **Mention owner or bot**. Extended mode keeps at most 30 ordinary group messages from the last 30 minutes in memory per chat. Those messages do not create sessions or call the model; they are attached as background only when a later message mentions the QR-bound owner or the bot. Mentioning both triggers once, and messages sent by the bot are ignored to prevent loops.
+
+Extended mode requires the app scope `im:message.group_msg` (receive all group messages) and a republished/approved app version. The account must also contain the `ownerOpenId` saved by QR pairing; without it, the adapter safely falls back to bot mentions. Context is memory-only and is cleared when the account stops or reconnects, or when DSH restarts.
 
 ## 📡 Supported channels
 

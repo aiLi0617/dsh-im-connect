@@ -32,9 +32,22 @@ export function createChannelAdapter(
         proxyUrl: config.proxyUrl,
       }, log); break
     case 'feishu':
-      adapter = createFeishuChannel('feishu', { appId: config.appId, appSecret: config.appSecret, host: options?.host }, log); break
+      adapter = createFeishuChannel('feishu', {
+        appId: config.appId,
+        appSecret: config.appSecret,
+        ownerOpenId: config.ownerOpenId,
+        groupTriggerMode: config.groupTriggerMode as 'bot-mention' | 'owner-or-bot' | undefined,
+        host: options?.host,
+      }, log); break
     case 'lark':
-      adapter = createFeishuChannel('lark', { appId: config.appId, appSecret: config.appSecret, domain: 'lark', host: options?.host }, log); break
+      adapter = createFeishuChannel('lark', {
+        appId: config.appId,
+        appSecret: config.appSecret,
+        ownerOpenId: config.ownerOpenId,
+        groupTriggerMode: config.groupTriggerMode as 'bot-mention' | 'owner-or-bot' | undefined,
+        domain: 'lark',
+        host: options?.host,
+      }, log); break
     case 'weixin':
       adapter = createWeixinChannel({ enabled: true, stateDir, botToken: config.botToken, onBotToken: options?.onWeixinBotToken, host: options?.host }, log, stateDir); break
     case 'wecom':
